@@ -6,9 +6,17 @@ on:
     - cron: '0 0 * * *'
   workflow_dispatch: # 允许手动触发
 
+permissions:
+  contents: read
+
+concurrency:
+  group: katabump-auto-renew
+  cancel-in-progress: false
+
 jobs:
   renew:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     
     steps:
     - uses: actions/checkout@v4
@@ -23,7 +31,26 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y xvfb
         npm install
-        npx playwright install-deps chrome
+        npx playwright install --with-deps chrome
+
+    - name: Validate Secrets
+      env:
+        USERS_JSON: ${{ secrets.USERS_JSON }}
+      run: |
+        node - <<'NODE'
+        if (!process.env.USERS_JSON) {
+          throw new Error('Missing required repository secret: USERS_JSON');
+        }
+        const users = JSON.parse(process.env.USERS_JSON);
+        if (!Array.isArray(users) || users.length === 0) {
+          throw new Error('USERS_JSON must be a non-empty JSON array');
+        }
+        for (const [index, user] of users.entries()) {
+          if (!user.username || !user.password) {
+            throw new Error(`USERS_JSON item ${index} must include username and password`);
+          }
+        }
+        NODE
       
     - name: Run Renew Script
       env:
@@ -36,9 +63,15 @@ jobs:
       # 使用 xvfb-run 模拟有头环境运行
       run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
 
+    - name: Prepare Screenshot Artifact
+      if: always()
+      run: mkdir -p screenshots
+
     - name: Upload Screenshots
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: screenshots
         path: screenshots/
+        if-no-files-found: warn
+        retention-days: 7
