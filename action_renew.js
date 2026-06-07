@@ -41,6 +41,25 @@ async function sendTelegramMessage(message, imagePath = null) {
     }
 }
 
+function getScreenshotPath(userIndex, suffix = 'final') {
+    const photoDir = path.join(process.cwd(), 'screenshots');
+    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
+    const safeSuffix = suffix.replace(/[^a-z0-9_-]/gi, '_');
+    return path.join(photoDir, `user_${userIndex + 1}_${safeSuffix}.png`);
+}
+
+async function saveScreenshot(page, userIndex, suffix = 'final') {
+    const screenshotPath = getScreenshotPath(userIndex, suffix);
+    try {
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        console.log(`截图已保存至: ${screenshotPath}`);
+        return screenshotPath;
+    } catch (e) {
+        console.log('截图失败:', e.message);
+        return null;
+    }
+}
+
 // 启用 stealth 插件
 chromium.use(stealth);
 
@@ -327,9 +346,12 @@ async function attemptTurnstileCdp(page) {
     await page.addInitScript(INJECTED_SCRIPT);
     console.log('注入脚本已添加。');
 
+    let hasFailures = false;
+
     for (let i = 0; i < users.length; i++) {
         const user = users[i];
-        console.log(`\n=== 正在处理用户 ${i + 1}/${users.length} ===`); // 隐去具体邮箱 logging
+        const userLabel = `用户 ${i + 1}`;
+        console.log(`\n=== 正在处理 ${userLabel}/${users.length} ===`); // 隐去具体邮箱 logging
 
         try {
             if (page.isClosed()) {
@@ -403,14 +425,11 @@ async function attemptTurnstileCdp(page) {
                 try {
                     const errorMsg = page.getByText('Incorrect password or no account');
                     if (await errorMsg.isVisible({ timeout: 3000 })) {
-                        console.error(`   >> ❌ 登录失败: 用户 ${user.username} 账号或密码错误`);
-                        const photoDir = path.join(process.cwd(), 'screenshots');
-                        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                        const safeUsername = user.username.replace(/[^a-z0-9]/gi, '_');
-                        const failShotPath = path.join(photoDir, `${safeUsername}.png`);
-                        try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
+                        console.error(`   >> ❌ 登录失败: ${userLabel} 账号或密码错误`);
+                        hasFailures = true;
+                        const failShotPath = await saveScreenshot(page, i, 'login_failed');
 
-                        await sendTelegramMessage(`❌ *登录失败*\n用户: ${user.username}\n原因: 账号或密码错误`, failShotPath);
+                        await sendTelegramMessage(`❌ *登录失败*\n用户: ${userLabel}\n原因: 账号或密码错误`, failShotPath);
 
                         continue;
                     }
@@ -418,6 +437,9 @@ async function attemptTurnstileCdp(page) {
 
             } catch (e) {
                 console.log('登录错误:', e.message);
+                hasFailures = true;
+                await saveScreenshot(page, i, 'login_error');
+                continue;
             }
 
             console.log('正在寻找 "See" 链接...');
@@ -426,7 +448,9 @@ async function attemptTurnstileCdp(page) {
                 await page.waitForTimeout(1000);
                 await page.getByRole('link', { name: 'See' }).first().click();
             } catch (e) {
-                console.log('未找到 "See" 按钮。');
+                console.error('未找到 "See" 按钮。');
+                hasFailures = true;
+                await saveScreenshot(page, i, 'missing_see');
                 continue;
             }
 
@@ -499,16 +523,7 @@ async function attemptTurnstileCdp(page) {
                     if (await confirmBtn.isVisible()) {
 
                         // User Requested: Screenshot BEFORE final click
-                        const fs = require('fs');
-                        const path = require('path');
-                        const photoDir = path.join(process.cwd(), 'screenshots');
-                        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                        const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                        const tsScreenshotName = `${safeUser}_Turnstile_${attempt}.png`;
-                        try {
-                            await page.screenshot({ path: path.join(photoDir, tsScreenshotName), fullPage: true });
-                            console.log(`   >> 📸 快照已保存: ${tsScreenshotName}`);
-                        } catch (e) { }
+                        await saveScreenshot(page, i, `turnstile_${attempt}`);
 
                         // User Request: 找不到的话这个循环直接下一步点击renew，然后检测有没有Please complete the captcha to continue
                         console.log('   >> 点击 Renew 确认按钮 (无论 Turnstile 状态如何)...');
@@ -534,15 +549,9 @@ async function attemptTurnstileCdp(page) {
                                     console.log(`   >> ⏳ 暂无法续期。下次可用时间: ${dateStr}`);
 
                                     // 截图证明
-                                    const fs = require('fs');
-                                    const path = require('path');
-                                    const photoDir = path.join(process.cwd(), 'screenshots');
-                                    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                                    const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                                    const skipShotPath = path.join(photoDir, `${safeUser}_skip.png`);
-                                    try { await page.screenshot({ path: skipShotPath, fullPage: true }); } catch (e) { }
+                                    const skipShotPath = await saveScreenshot(page, i, 'skip');
 
-                                    await sendTelegramMessage(`⏳ *暂无法续期 (跳过)*\n用户: ${user.username}\n原因: 还没到时间\n下次可用: ${dateStr}`, skipShotPath);
+                                    await sendTelegramMessage(`⏳ *暂无法续期 (跳过)*\n用户: ${userLabel}\n原因: 还没到时间\n下次可用: ${dateStr}`, skipShotPath);
 
                                     renewSuccess = true; // Mark as done to stop retries
                                     try {
@@ -570,15 +579,9 @@ async function attemptTurnstileCdp(page) {
                             console.log('   >> ✅ Modal closed. Renew successful!');
 
                             // 截图成功状态
-                            const fs = require('fs');
-                            const path = require('path');
-                            const photoDir = path.join(process.cwd(), 'screenshots');
-                            if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                            const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                            const successShotPath = path.join(photoDir, `${safeUser}_success.png`);
-                            try { await page.screenshot({ path: successShotPath, fullPage: true }); } catch (e) { }
+                            const successShotPath = await saveScreenshot(page, i, 'success');
 
-                            await sendTelegramMessage(`✅ *续期成功*\n用户: ${user.username}\n状态: 服务器已成功续期！`, successShotPath);
+                            await sendTelegramMessage(`✅ *续期成功*\n用户: ${userLabel}\n状态: 服务器已成功续期！`, successShotPath);
                             renewSuccess = true;
                             break;
                         } else {
@@ -595,34 +598,31 @@ async function attemptTurnstileCdp(page) {
                     }
 
                 } else {
-                    console.log('未找到 Renew 按钮 (服务器可能已续期或页面加载错误)。');
+                    console.error('未找到 Renew 按钮 (服务器可能已续期或页面加载错误)。');
+                    hasFailures = true;
+                    await saveScreenshot(page, i, 'missing_renew');
                     break;
                 }
             }
+
+            if (!renewSuccess) {
+                console.error(`${userLabel} 未确认续期成功。`);
+                hasFailures = true;
+                await saveScreenshot(page, i, 'renew_not_confirmed');
+            }
         } catch (err) {
             console.error(`Error processing user:`, err);
+            hasFailures = true;
         }
 
         // Snapshot before handling next user
         // In GitHub Actions, we save to 'screenshots' dir
-        const fs = require('fs');
-        const path = require('path');
-        const photoDir = path.join(process.cwd(), 'screenshots');
-        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-        // Use safe filename
-        const safeUsername = user.username.replace(/[^a-z0-9]/gi, '_');
-        const screenshotPath = path.join(photoDir, `${safeUsername}.png`);
-        try {
-            await page.screenshot({ path: screenshotPath, fullPage: true });
-            console.log(`截图已保存至: ${screenshotPath}`);
-        } catch (e) {
-            console.log('截图失败:', e.message);
-        }
+        await saveScreenshot(page, i, 'final');
 
         console.log(`用户处理完成\n`);
     }
 
     console.log('完成。');
     await browser.close();
-    process.exit(0);
+    process.exit(hasFailures ? 1 : 0);
 })();
